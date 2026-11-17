@@ -1,0 +1,29 @@
+POOL GUIDE - PROYECTO ANDROID
+
+Este archivo contiene el código fuente Android de Pool Guide.
+No es un APK y no se puede instalar directamente en el teléfono.
+
+REQUISITOS DEL PROYECTO
+- Android mínimo: 9 (API 28)
+- Android compile/target SDK: 34
+- Java: 17
+- Gradle: 8.7
+
+COMPILACIÓN
+El proyecto incluye .github/workflows/build.yml para compilar automáticamente
+un APK debug mediante GitHub Actions cuando el repositorio recibe un push o
+cuando se ejecuta manualmente el flujo "Build APK".
+
+El APK resultante se publica como artefacto llamado "PoolGuide-apk" y el archivo
+se llama app-debug.apk.
+
+PERMISOS EN EL TELÉFONO
+La aplicación necesita permiso de "Mostrar sobre otras aplicaciones" para
+poder dibujar la guía encima de otros juegos. Android también puede pedir
+permiso para mostrar la notificación del servicio.
+
+IMPORTANTE
+El código fuente fue inspeccionado, pero en este entorno no están instalados
+Android SDK ni Gradle y no hay acceso a Internet para descargarlos. Por eso,
+no se ha podido compilar ni probar un APK aquí. No instalar este ZIP como si
+fuera una aplicación.
