@@ -1,188 +1,338 @@
-package com.dilan.poolguide
+package com.dillan.poolguide
 
 import android.content.Context
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.PointF
 import android.graphics.RectF
+import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
-import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.hypot
-import kotlin.math.min
-import kotlin.math.sin
 
-/** Mesa de billar virtual (proporción 2:1). Centro (cx, cy), ancho tw, rotación angle. */
-class TableView(ctx: Context) : View(ctx) {
+class TableView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+    defStyleAttr: Int = 0
+) : View(context, attrs, defStyleAttr) {
 
-    var cx = 0f
-    var cy = 0f
-    var tw = 0f
-    var angle = 0f
-    var tableAlpha = 0.75f
-    var editMode = true
+    // Área jugable de la mesa (ajustable con botones +/- y flechas)
+    var tableRect = RectF(220f, 140f, 1700f, 940f)
+        set(value) {
+            field = value
+            updatePockets()
+            clampCueBall()
+            invalidate()
+        }
 
-    private val d = ctx.resources.displayMetrics.density
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val th: Float get() = tw / 2f
+    // Posición de la bola blanca y del punto de mira/objetivo
+    var cueBall = PointF(680f, 540f)
+    var aimPoint = PointF(1220f, 540f)
 
-    // gestos
-    private var dragging = false
-    private var multi = false
-    private var lastX = 0f
-    private var lastY = 0f
-    private var startDist = 1f
-    private var startAng = 0f
-    private var baseW = 0f
-    private var baseAngle = 0f
+    // Opciones configurables desde la barra flotante
+    var maxBounces = 2          // 0 = sin rebotes, 1 = 1 banda, 2 = 2 bandas
+    var pocketRadius = 56f      // Radio de detección de tronera
+    var showGhostBall = true
 
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        if (tw == 0f) {
-            cx = w / 2f
-            cy = h / 2f
-            tw = min(w * 0.7f, h * 1.4f)
+    private var pockets: List<PointF> = emptyList()
+    private var activeTarget: TargetMode = TargetMode.AIM
+
+    private enum class TargetMode { NONE, CUE_BALL, AIM }
+
+    // --- Estilos estilo neón ---
+    private val tableBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(210, 0, 255, 163)
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+
+    private val neonGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(135, 0, 240, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = 14f
+        strokeCap = Paint.Cap.ROUND
+        maskFilter = BlurMaskFilter(14f, BlurMaskFilter.Blur.NORMAL)
+    }
+
+    private val neonCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 3.2f
+        strokeCap = Paint.Cap.ROUND
+    }
+
+    private val bounceGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(120, 255, 200, 0)
+        style = Paint.Style.STROKE
+        strokeWidth = 11f
+        strokeCap = Paint.Cap.ROUND
+        pathEffect = DashPathEffect(floatArrayOf(22f, 14f), 0f)
+        maskFilter = BlurMaskFilter(12f, BlurMaskFilter.Blur.NORMAL)
+    }
+
+    private val bounceCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(235, 255, 235, 120)
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f
+        strokeCap = Paint.Cap.ROUND
+        pathEffect = DashPathEffect(floatArrayOf(22f, 14f), 0f)
+    }
+
+    private val cueBallPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(220, 255, 255, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+
+    private val pocketNormalPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(130, 255, 82, 82)
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+    }
+
+    private val pocketConfirmedGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(210, 0, 255, 120)
+        style = Paint.Style.STROKE
+        strokeWidth = 16f
+        maskFilter = BlurMaskFilter(18f, BlurMaskFilter.Blur.NORMAL)
+    }
+
+    private val pocketConfirmedCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(255, 110, 255, 170)
+        style = Paint.Style.FILL
+    }
+
+    init {
+        setLayerType(LAYER_TYPE_SOFTWARE, null) // Necesario para BlurMaskFilter en trazos
+        updatePockets()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w > 0 && h > 0 && oldw == 0 && oldh == 0) {
+            val padX = w * 0.12f
+            val padY = h * 0.14f
+            tableRect = RectF(padX, padY, w - padX, h - padY)
+            cueBall = PointF(tableRect.left + tableRect.width() * 0.28f, tableRect.centerY())
+            aimPoint = PointF(tableRect.left + tableRect.width() * 0.65f, tableRect.centerY())
+            updatePockets()
         }
     }
 
-    private fun col(r: Int, g: Int, b: Int, a: Int) =
-        Color.argb((a * tableAlpha).toInt().coerceIn(0, 255), r, g, b)
-
-    private fun fill(color: Int) { p.style = Paint.Style.FILL; p.color = color }
-    private fun stroke(color: Int, wd: Float = 2f) {
-        p.style = Paint.Style.STROKE; p.color = color; p.strokeWidth = wd * d
-    }
-
-    override fun onDraw(c: Canvas) {
-        if (tw <= 0f) return
-
-        c.save()
-        c.translate(cx, cy)
-        c.rotate(angle)
-
-        val w = tw
-        val h = th
-        val rail = w * 0.05f
-        val outer = RectF(-w / 2, -h / 2, w / 2, h / 2)
-        val inner = RectF(outer.left + rail, outer.top + rail, outer.right - rail, outer.bottom - rail)
-
-        // cojines
-        fill(col(255, 200, 0, 25)); c.drawRoundRect(outer, 10 * d, 10 * d, p)
-        stroke(col(255, 200, 0, 255)); c.drawRoundRect(outer, 10 * d, 10 * d, p)
-        // paño
-        fill(col(0, 255, 120, 20)); c.drawRect(inner, p)
-        stroke(col(0, 255, 120, 255)); c.drawRect(inner, p)
-
-        // troneras
-        val pr = rail * 0.8f
-        stroke(col(255, 60, 60, 255))
-        val pockets = listOf(
-            inner.left to inner.top, inner.right to inner.top,
-            inner.left to inner.bottom, inner.right to inner.bottom,
-            0f to (inner.top - rail * 0.2f), 0f to (inner.bottom + rail * 0.2f)
+    private fun updatePockets() {
+        val midX = tableRect.centerX()
+        pockets = listOf(
+            PointF(tableRect.left, tableRect.top),          // Esquina superior izquierda
+            PointF(midX, tableRect.top),                    // Tronera central superior
+            PointF(tableRect.right, tableRect.top),         // Esquina superior derecha
+            PointF(tableRect.left, tableRect.bottom),       // Esquina inferior izquierda
+            PointF(midX, tableRect.bottom),                 // Tronera central inferior
+            PointF(tableRect.right, tableRect.bottom)       // Esquina inferior derecha
         )
-        for ((x, y) in pockets) c.drawCircle(x, y, pr, p)
-
-        // línea de cabecera
-        val hx = inner.left + inner.width() * 0.25f
-        stroke(col(255, 255, 255, 200), 1f)
-        p.pathEffect = DashPathEffect(floatArrayOf(10 * d, 8 * d), 0f)
-        c.drawLine(hx, inner.top, hx, inner.bottom, p)
-        p.pathEffect = null
-
-        // puntos
-        fill(col(255, 255, 255, 220))
-        for (x in listOf(hx, 0f, inner.left + inner.width() * 0.75f)) c.drawCircle(x, 0f, 3 * d, p)
-
-        // diamantes
-        for (i in 1..7) {
-            if (i == 4) continue
-            val x = inner.left + inner.width() * i / 8f
-            c.drawCircle(x, outer.top + rail / 2, 2 * d, p)
-            c.drawCircle(x, outer.bottom - rail / 2, 2 * d, p)
-        }
-        for (i in 1..3) {
-            val y = inner.top + inner.height() * i / 4f
-            c.drawCircle(outer.left + rail / 2, y, 2 * d, p)
-            c.drawCircle(outer.right - rail / 2, y, 2 * d, p)
-        }
-
-        c.restore()
-
-        if (editMode) {
-            p.style = Paint.Style.FILL
-            p.color = Color.WHITE
-            p.textSize = 13 * d
-            p.textAlign = Paint.Align.CENTER
-            p.setShadowLayer(4f, 0f, 0f, Color.BLACK)
-            c.drawText("EDITAR: 1 dedo = mover · 2 dedos = tamaño y giro", width / 2f, height - 16 * d, p)
-            p.clearShadowLayer()
-            p.textAlign = Paint.Align.LEFT
-        }
     }
 
-    private fun hit(x: Float, y: Float): Boolean {
-        val a = Math.toRadians(-angle.toDouble())
-        val dx = x - cx
-        val dy = y - cy
-        val lx = dx * cos(a) - dy * sin(a)
-        val ly = dx * sin(a) + dy * cos(a)
-        val m = 40 * d
-        return abs(lx) <= tw / 2 + m && abs(ly) <= th / 2 + m
+    private fun clampCueBall() {
+        cueBall.x = cueBall.x.coerceIn(tableRect.left, tableRect.right)
+        cueBall.y = cueBall.y.coerceIn(tableRect.top, tableRect.bottom)
     }
 
-    private fun dist(e: MotionEvent) = hypot(e.getX(1) - e.getX(0), e.getY(1) - e.getY(0))
-    private fun ang(e: MotionEvent) =
-        Math.toDegrees(atan2((e.getY(1) - e.getY(0)).toDouble(), (e.getX(1) - e.getX(0)).toDouble())).toFloat()
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
 
-    override fun onTouchEvent(e: MotionEvent): Boolean {
-        if (!editMode) return false
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                if (!hit(e.x, e.y)) return false
-                dragging = true
-                lastX = e.x
-                lastY = e.y
+        // 1. Borde de referencia de la mesa
+        canvas.drawRect(tableRect, tableBorderPaint)
+
+        // 2. Calcular segmentos de trayectoria con rebotes en bandas
+        val segments = computeTrajectorySegments()
+        val confirmedPocket = findConfirmedPocket(segments)
+
+        // 3. Dibujar troneras (verde brillante si la trayectoria apunta dentro del radio)
+        for (pocket in pockets) {
+            val isConfirmed = confirmedPocket != null &&
+                hypot(pocket.x - confirmedPocket.x, pocket.y - confirmedPocket.y) < 1f
+            if (isConfirmed) {
+                canvas.drawCircle(pocket.x, pocket.y, pocketRadius * 1.15f, pocketConfirmedGlowPaint)
+                canvas.drawCircle(pocket.x, pocket.y, pocketRadius * 0.38f, pocketConfirmedCorePaint)
+            } else {
+                canvas.drawCircle(pocket.x, pocket.y, pocketRadius * 0.75f, pocketNormalPaint)
             }
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                if (e.pointerCount == 2) {
-                    multi = true
-                    dragging = false
-                    startDist = dist(e).coerceAtLeast(1f)
-                    startAng = ang(e)
-                    baseW = tw
-                    baseAngle = angle
+        }
+
+        // 4. Dibujar líneas estilo neón (línea directa en cian/blanco, rebotes en ámbar punteado)
+        segments.forEachIndexed { index, seg ->
+            if (index == 0) {
+                canvas.drawLine(seg.start.x, seg.start.y, seg.end.x, seg.end.y, neonGlowPaint)
+                canvas.drawLine(seg.start.x, seg.start.y, seg.end.x, seg.end.y, neonCorePaint)
+            } else {
+                canvas.drawLine(seg.start.x, seg.start.y, seg.end.x, seg.end.y, bounceGlowPaint)
+                canvas.drawLine(seg.start.x, seg.start.y, seg.end.x, seg.end.y, bounceCorePaint)
+            }
+        }
+
+        // 5. Bola blanca y punto de mira / bola fantasma
+        canvas.drawCircle(cueBall.x, cueBall.y, 22f, cueBallPaint)
+        if (showGhostBall) {
+            canvas.drawCircle(aimPoint.x, aimPoint.y, 20f, cueBallPaint)
+        }
+    }
+
+    private data class Segment(val start: PointF, val end: PointF)
+
+    private fun computeTrajectorySegments(): List<Segment> {
+        val result = mutableListOf<Segment>()
+        var dx = aimPoint.x - cueBall.x
+        var dy = aimPoint.y - cueBall.y
+        val len = hypot(dx, dy)
+        if (len < 1f) return result
+
+        var vx = dx / len
+        var vy = dy / len
+        var current = PointF(cueBall.x, cueBall.y)
+
+        // Primer tramo hasta el punto de mira (o hasta tocar banda si aimPoint está más lejos)
+        val firstHit = intersectTable(current, vx, vy)
+        val distToAim = hypot(aimPoint.x - current.x, aimPoint.y - current.y)
+        val distToWall = firstHit?.let { hypot(it.point.x - current.x, it.point.y - current.y) } ?: Float.MAX_VALUE
+
+        if (distToWall < distToAim && firstHit != null) {
+            result.add(Segment(current, firstHit.point))
+            current = firstHit.point
+            if (firstHit.hitHorizontal) vx = -vx
+            if (firstHit.hitVertical) vy = -vy
+        } else {
+            result.add(Segment(current, PointF(aimPoint.x, aimPoint.y)))
+            current = PointF(aimPoint.x, aimPoint.y)
+        }
+
+        // Rebotes adicionales en bandas (bank shots)
+        for (b in 0 until maxBounces) {
+            val hit = intersectTable(current, vx, vy) ?: break
+            result.add(Segment(current, hit.point))
+            current = hit.point
+            if (hit.hitHorizontal) vx = -vx
+            if (hit.hitVertical) vy = -vy
+        }
+
+        return result
+    }
+
+    private data class WallHit(
+        val point: PointF,
+        val hitHorizontal: Boolean,
+        val hitVertical: Boolean
+    )
+
+    private fun intersectTable(origin: PointF, vx: Float, vy: Float): WallHit? {
+        var bestT = Float.MAX_VALUE
+        var hitH = false
+        var hitV = false
+
+        if (vx < -1e-4f) {
+            val t = (tableRect.left - origin.x) / vx
+            if (t > 0.5f && t < bestT) {
+                val y = origin.y + vy * t
+                if (y >= tableRect.top - 1f && y <= tableRect.bottom + 1f) {
+                    bestT = t; hitH = true; hitV = false
                 }
+            }
+        } else if (vx > 1e-4f) {
+            val t = (tableRect.right - origin.x) / vx
+            if (t > 0.5f && t < bestT) {
+                val y = origin.y + vy * t
+                if (y >= tableRect.top - 1f && y <= tableRect.bottom + 1f) {
+                    bestT = t; hitH = true; hitV = false
+                }
+            }
+        }
+
+        if (vy < -1e-4f) {
+            val t = (tableRect.top - origin.y) / vy
+            if (t > 0.5f && t < bestT) {
+                val x = origin.x + vx * t
+                if (x >= tableRect.left - 1f && x <= tableRect.right + 1f) {
+                    bestT = t; hitH = false; hitV = true
+                }
+            }
+        } else if (vy > 1e-4f) {
+            val t = (tableRect.bottom - origin.y) / vy
+            if (t > 0.5f && t < bestT) {
+                val x = origin.x + vx * t
+                if (x >= tableRect.left - 1f && x <= tableRect.right + 1f) {
+                    bestT = t; hitH = false; hitV = true
+                }
+            }
+        }
+
+        if (bestT == Float.MAX_VALUE) return null
+        return WallHit(
+            point = PointF(origin.x + vx * bestT, origin.y + vy * bestT),
+            hitHorizontal = hitH,
+            hitVertical = hitV
+        )
+    }
+
+    private fun findConfirmedPocket(segments: List<Segment>): PointF? {
+        for (pocket in pockets) {
+            for (seg in segments) {
+                if (distanceToSegment(pocket, seg.start, seg.end) <= pocketRadius) {
+                    return pocket
+                }
+            }
+        }
+        return null
+    }
+
+    private fun distanceToSegment(p: PointF, a: PointF, b: PointF): Float {
+        val abx = b.x - a.x
+        val aby = b.y - a.y
+        val lenSq = abx * abx + aby * aby
+        if (lenSq < 1e-4f) return hypot(p.x - a.x, p.y - a.y)
+        val t = (((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq).coerceIn(0f, 1f)
+        val projX = a.x + t * abx
+        val projY = a.y + t * aby
+        return hypot(p.x - projX, p.y - projY)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val dCue = hypot(event.x - cueBall.x, event.y - cueBall.y)
+                val dAim = hypot(event.x - aimPoint.x, event.y - aimPoint.y)
+                activeTarget = when {
+                    dCue <= 85f && dCue <= dAim -> TargetMode.CUE_BALL
+                    dAim <= 110f -> TargetMode.AIM
+                    else -> TargetMode.AIM
+                }
+                moveTarget(event.x, event.y)
+                return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (multi && e.pointerCount >= 2) {
-                    tw = (baseW * dist(e) / startDist).coerceIn(150 * d, width * 3f)
-                    angle = baseAngle + (ang(e) - startAng)
-                    invalidate()
-                } else if (dragging && e.pointerCount == 1) {
-                    cx += e.x - lastX
-                    cy += e.y - lastY
-                    lastX = e.x
-                    lastY = e.y
-                    invalidate()
-                }
-            }
-            MotionEvent.ACTION_POINTER_UP -> {
-                multi = false
-                val idx = if (e.actionIndex == 0) 1 else 0
-                if (idx < e.pointerCount) {
-                    lastX = e.getX(idx)
-                    lastY = e.getY(idx)
-                    dragging = true
-                }
+                moveTarget(event.x, event.y)
+                return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                dragging = false
-                multi = false
+                activeTarget = TargetMode.NONE
+                return true
             }
         }
-        return true
+        return super.onTouchEvent(event)
+    }
+
+    private fun moveTarget(x: Float, y: Float) {
+        when (activeTarget) {
+            TargetMode.CUE_BALL -> {
+                cueBall.x = x.coerceIn(tableRect.left, tableRect.right)
+                cueBall.y = y.coerceIn(tableRect.top, tableRect.bottom)
+            }
+            TargetMode.AIM -> {
+                aimPoint.x = x
+                aimPoint.y = y
+            }
+            TargetMode.NONE -> Unit
+        }
+        invalidate()
     }
 }
